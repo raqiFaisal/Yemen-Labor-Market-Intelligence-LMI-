@@ -242,6 +242,6 @@ pytest -q tests/test_dl_system.py
 
 «من البيانات إلى رؤى تدعم مستقبل سوق العمل اليمني»
 
-**Developed by: Eng. Ruqayya Faisal Al-Taybi**
+**Developed by: Eng. Ruqia Faisal Al-Taibi**
 
 **Yemen Labor Market Intelligence (LMI)**
