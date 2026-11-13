@@ -1,188 +1,229 @@
-> **تنبيه حالة الإصدار:** اقرأ [README_CURRENT.md](README_CURRENT.md) و[reports/CURRENT_EXECUTION_2026-11-05.md](reports/CURRENT_EXECUTION_2026-11-05.md) قبل الاعتماد على أرقام التدريب/التقييم المذكورة أدناه.
+# 🇾🇪 Yemen Labor Market Intelligence (LMI)
+### AI-Powered Yemeni Labor Market Analysis & Forecasting
 
-> **الحالة الحالية (2026-11-05):** اقرأ [`README_ENGINEERED.md`](README_ENGINEERED.md) و[`reports/FINAL_ENGINEERING_STATUS.md`](reports/FINAL_ENGINEERING_STATUS.md) أولاً. يوجد تدريب PyTorch CPU حقيقي على Silver، لكن AraBERT وGold البشري غير مكتملين. لا تعتمد ادعاءات اكتمال تاريخية أدناه دون الرجوع لتقرير التدقيق.
+**ذكاء سوق العمل اليمني**
 
-# AI Labor Market Intelligence
-**نظام ذكي لتحليل سوق العمل اليمني والتنبؤ بالمهارات المستقبلية** — مشروع تخرج في التعلم العميق.
+An intelligent platform designed to analyze job market announcements, extract employment information, discover skill demand, and explore future labor market trends using Deep Learning and Natural Language Processing.
 
-تطبيق Streamlit عربي (RTL) يعمل على بيانات حقيقية مجمعة من YemenHR، ومتصل بثلاثة مكونات تعلم عميق:
-**Transformer مجمَّد** للتمثيل الدلالي، **FNN (PyTorch)** لتصنيف المجالات، و **LSTM (PyTorch)** للتنبؤ بالطلب على المهارات.
+منصة ذكية لتحليل إعلانات سوق العمل اليمني، واستخراج المعلومات الوظيفية، وتحليل المهارات المطلوبة، واستكشاف اتجاهات الطلب المستقبلية باستخدام تقنيات التعلم العميق ومعالجة اللغة الطبيعية.
 
----
-
-## التشغيل من البداية للنهاية
-
-### Google Colab (موصى به)
-افتح `run_on_colab.ipynb` ونفّذ الخلايا بالترتيب: رفع المشروع ← المكتبات ← ربط Drive ← الجمع ← التدريب ← الفحص ← رابط التطبيق.
-
-### محلياً
-```bash
-pip install -r requirements.txt
-python -m scripts.scrape_yemen --site yemenhr     # جمع الإعلانات الحقيقية (يتطلب اتصالاً بالموقع)
-python -m scripts.scrape_yemen --status           # عدد الإعلانات المحفوظة فعلاً
-python -m scripts.train_all                       # توحيد + Embeddings + مهارات + FNN + LSTM + تقرير
-streamlit run app.py
-```
-
-### وضعا التشغيل (فصل كامل بين الحقيقي والتجريبي)
-| | الوضع الحقيقي (افتراضي) | وضع العرض التجريبي |
-|---|---|---|
-| التفعيل | `streamlit run app.py` | `python -m scripts.train_demo` ثم `LMI_MODE=demo streamlit run app.py` |
-| المدخلات | `data/raw/` فقط | `data/demo/` فقط (اصطناعي) |
-| المخرجات | `data/processed/`, `artifacts/` | `data/processed_demo/`, `artifacts_demo/` |
-| الواجهة | تعرض المصدر وتاريخ الجمع | شريط "تجريبي" في كل صفحة وتقرير |
-
-الوضع الحقيقي يرفض أي ملف `demo_*` أو سجل `source=DEMO_SYNTHETIC`، فلا يمكن أن تختلط بيانات أو نماذج DEMO بالنتائج الحقيقية.
+**Developed by:** Eng. Ruqayya Faisal Al-Taybi  
+**إعداد وتطوير:** المهندسة رقية فيصل الطيبي
 
 ---
 
-## 1. جمع البيانات (`scripts/scrape_yemen.py`, `scripts/scrapers/`)
+## 1. Project Overview | نظرة عامة
 
-**YemenHR** — بنية الموقع مرصودة فعلياً (نوفمبر 2026):
-- جدول القائمة: Posted | Organization | Title | Location | Deadline (تاريخ بصيغة `04 Nov, 26`).
-- معرف الإعلان: آخر 8 خانات ست عشرية في الرابط `/jobs/{slug}-{id}`.
-- الترقيم: يتبع رابط **Next** الحقيقي (وقت الفحص: 53 إعلاناً نشطاً على صفحتين).
-- التصنيفات `/categories/{slug}`: تُزار لربط كل إعلان بتصنيف الموقع، وهي التسمية الحقيقية للمصنف.
-  صفحات التصنيفات تربط الإعلان برابط **UUID** مثل `/jobs/1ef02a5e-ed38-…`، لا بالرابط المختصر. لذلك تتم المطابقة **بمعرف الإعلان**، وهو أول 8 خانات من الـ UUID، وقد تحقّقت من ذلك على الموقع. الإعلانات المحفوظة سابقاً يُحدَّث تصنيفها دون إعادة تنزيلها.
-- الدولة تُستنتج من الموقع: بعض إعلانات YemenHR خارج اليمن (مثل Saudi Arabia)، ولا تُحسب ضمن السوق اليمني.
+Yemen Labor Market Intelligence (LMI) transforms unstructured job announcements into structured information and interactive labor market insights.
 
-**الحقول المستخرجة:**
-- المسمى، الجهة، الموقع الخام والمحافظة الموحدة، الدولة.
-- تاريخ النشر وآخر موعد، مع النص الخام لكل منهما.
-- التصنيف.
-- نوع التوظيف، مستوى الخبرة، سنوات الخبرة، المؤهل: تُملأ فقط إن ذُكرت صراحة.
-- نص المتطلبات، والوصف الأصلي كما هو، وقسم التقديم، ولغة الإعلان.
-- الرابط، وتاريخ الجمع، وإصدار المحلل.
+The platform integrates data processing, Arabic language understanding, deep learning models, and time-series forecasting into one application.
 
-**قواعد الجمع:**
-- يحترم robots.txt، ويترك 3 ثوانٍ وفترة عشوائية بين الطلبات، ويرسل طلباً واحداً في كل مرة، ويعيد المحاولة تدريجياً عند 429/5xx.
-- **الرابط المكتشف ليس إعلاناً**: يُحفظ في `state/` فقط، ولا يُكتب الإعلان في CSV إلا بعد نجاح استخراجه.
-- كل فشل يُسجَّل بسببه في `logs/yemenhr_failures.csv`. فشل 404 يُتخطى لاحقاً، وفشل التحليل يُعاد.
-- إزالة التكرار بمعرف الإعلان أو بالرابط. الإعلان المعاد نشره بمحتوى مطابق يُعلَّم `possible_duplicate`.
-- الاستكمال يتخطى المحفوظ، والعدادات تُحفظ لكل تشغيل في `logs/yemenhr_runs.jsonl`.
+يهدف المشروع إلى تحويل إعلانات الوظائف غير المنظمة إلى معلومات منظمة ومؤشرات تفاعلية تساعد على فهم سوق العمل اليمني واتجاهاته.
 
-**مصادر أخرى:** Yemen ShortList وYemen Board لهما محوّل تكيّفي تجريبي (`scrapers/generic.py`) لم تُفحص بنيته. كل مصدر في ملف منفصل `yemen_<source>.csv`، ومع كل سجل اسم مصدره.
+## 2. Main Features | الوظائف الرئيسية
 
-**شروط الاستخدام:** شروط YemenHR (`/terms`) لا تتناول الجمع الآلي. استخدمه لأغراض بحثية مع ذكر المصدر.
+- **Interactive Dashboard:** Overview of labor market indicators and statistics.
+- **Market Analysis:** Explore job opportunities, specializations, skills, and geographic distribution.
+- **Job Advertisement Analysis:** Classify announcements and extract important information.
+- **Skill Demand Analysis:** Identify frequently requested professional skills.
+- **Future Forecasting:** Explore expected demand trends.
+- **Skill Gap Analysis:** Compare individual skills with market requirements.
+- **Job Search:** Search and explore available opportunities.
+- **Model Information:** View information about the integrated AI models.
 
-## 2. معالجة النصوص واستخراج المهارات
+## 3. Deep Learning Architecture | معمارية التعلم العميق
 
-**`preprocessing/text.py`:**
-- النص الأصلي لا يُعدَّل أبداً، ويُحفظ في `description_raw`.
-- `clean_for_model`: إزالة التشكيل والتطويل والمحارف الخفية والروابط والبريد والهواتف وأسطر الضوضاء والأسطر المكررة، وقطع قسم "How to Apply". الحروف تبقى كما هي.
-- `normalize_for_match`: نسخة للمطابقة فقط. توحّد أ/إ/آ→ا، ى→ي، ة→ه، والأرقام الهندية، والفواصل (`Power-BI` و`PowerBI` تصبحان "power bi").
+### AraBERT Models
 
-**`models/skill_extractor.py`** (الإصدار hybrid-3.0) يأخذ قراراً معلَّلاً لكل زوج (إعلان، مهارة): `accepted` أو `review` أو `rejected`، مع سبب صريح.
+The project uses fine-tuning of pretrained AraBERT for Arabic job market understanding.
 
-- **قاموسي** (قاعدي، *ليس Deep Learning*): المطابقة تتم داخل كل مقطع (سطر أو جملة)، ثم تمر بفحوص السياق في `preprocessing/skill_rules.py`:
-  - **أسطر لا تصف المهارة:** أسطر التقديم والتواصل والبيانات الإدارية تُرفض (مثل «مكان العمل:»).
-  - **النفي القريب:** يُرفض التطابق المنفي (لا يشترط / not required).
-  - **المعاني الأخرى للكلمة:** تُرفض (food security، قيادة السيارات، reporting to، cash assistance، 5 ml، excel in).
-  - **المرادفات الغامضة:** مثل التوظيف والشبكات والاتصال، تحتاج سياقاً داعماً، وإلا تُحال للمراجعة.
-- **دلالي** (Transformer مجمَّد): القبول يتطلب ثلاثة شروط معاً:
-  - تشابهاً ≥ عتبة المهارة (0.75، و0.82 للمهارات الشخصية).
-  - فرقاً ≥ 0.03 عن المهارة الثانية.
-  - **كلمة دالّة** مشتركة مع مفردات المهارة. الكلمات العامة لا تكفي: learning، admin، العمل، نظم، الأمان، الأرباح.
-  - التشابه المتوسط، أو المرتفع دون كلمة دالة، يُحال للمراجعة لا للقبول.
-- **الثقة** درجة استدلالية موثقة، **ليست احتمالاً**:
+Three main tasks:
 
-  | الحالة | الثقة |
-  |---|---|
-  | اسم المهارة نفسه | 0.90 |
-  | مرادف صريح | 0.85 |
-  | مرادف غامض مع سياق داعم | 0.75 |
-  | مرادف غامض بلا سياق (مراجعة) | 0.50 |
-  | دلالي | ≤ 0.85 |
-  | قاموسي ودلالي على نفس المقطع | ≤ 0.95 |
+1. **Opportunity Type Classification:** Classifies announcements into opportunity categories.
+2. **Geographic Scope Classification:** Identifies the geographic coverage of opportunities.
+3. **Named Entity Recognition (NER):** Extracts information such as job titles, organizations, skills, qualifications, experience, locations, salaries, and deadlines.
 
-  لا تصل الثقة إلى 1.00 أبداً.
-- **الدليل** مقتطف فعلي من نص الإعلان.
-- **المخرجات:**
-  - `processed/job_skills.pkl`: المقبولة فقط.
-  - `processed/skill_decisions.pkl`: كل القرارات مع أسبابها.
-  - `processed/skill_candidates.csv`: كل المرشحات الخام.
-- **المراجعة البشرية:** صفحة «مراجعة التصنيفات» ← تبويب المهارات. المراجعات تُحفظ في `labels/skill_reviews.csv` وتُطبَّق في التدريب التالي.
-- **التقييم:** `python -m scripts.inspect_skills eval` يكتب `reports/skill_extraction_report.md`:
-  - مع تعليم كامل: Precision وRecall وF1 لكل طريقة، مع تحليل الأخطاء.
-  - مع المراجعات فقط: Precision على العناصر المراجَعة.
-  - دون أي تعليم: يصرّح التقرير بعدم وجود دقة مقاسة.
-- **اختبارات الانحدار:** `python -m tests.test_skill_extraction` (51 حالة عربية وإنجليزية، إيجابية وسلبية، تشمل أخطاء Colab الست). هذه اختبارات قواعد، **ليست مقياس دقة**.
+### LSTM Forecasting
 
-**Embeddings (`models/embedding_store.py`):**
-- مخزن تزايدي بمفتاح SHA1 للنص لكل نموذج: الإعلانات الجديدة فقط تُرمَّز.
-- `artifacts/job_embeddings.npy` مع `job_embeddings_ids.json` للتحقق من تطابق الصفوف.
+LSTM models are implemented for four time-series families:
 
-## 3. مصنف المجالات FNN (`models/classifier.py`)
-- **الفئات الثماني:** هندسة البرمجيات، علم البيانات، المحاسبة، التسويق، الموارد البشرية، الرعاية الصحية، الهندسة، الإدارة.
-- **التسميات الموثوقة فقط:**
-  - `gold`: تصنيف يدوي من صفحة "مراجعة التصنيفات" أو من `scripts/label_jobs.py`.
-  - `source`: تصنيف الموقع بعد مطابقة **صريحة** عبر `data/taxonomy/category_map.json`.
-  - التصنيفات الغامضة مثل "Development" تبقى بلا تسمية وتُحال للمراجعة.
-  - التسميات الآلية من المسمى والمهارات **اقتراحات للمراجعة فقط**، ولا تُستخدم للتدريب إلا بخيار صريح `--allow-weak-labels`، ويُوسم تقييمها حينها Silver.
-- **المعمارية:** Linear(384→256)→ReLU→Dropout(0.3)→Linear(256→128)→ReLU→Dropout(0.3)→Linear(→C).
-- **التدريب:** CrossEntropy بأوزان عكسية للفئات، وAdamW، وEarly Stopping على Val F1 مع حفظ أفضل حالة.
-- **التقسيم 70/15/15:** طبقي ويحترم **مجموعات التكرار**، فالإعلان المعاد نشره لا يقع في التدريب والاختبار معاً. يتحقق الكود من صفر تداخل. عند وجود 20 تسمية يدوية أو أكثر تُستخدم وحدها كاختبار مستقل.
-- **المقاييس:** Accuracy، Precision، Recall، F1، مصفوفة الالتباس، وخط أساس "الفئة الأكثر".
-- **شروط التدريب:** 60 سجلاً موثوقاً، وفئتان على الأقل بكل منهما 5 سجلات. يُطبع العجز لكل فئة.
-- **عند عدم الكفاية:** يُعاد استخدام مصنف سابق فقط إن كان مدرباً على بيانات حقيقية وبنفس المُرمِّز، ويُوسم بتاريخ تدريبه وحجمه. وإلا يُحذف ويُكتب السبب.
-
-## 4. LSTM للتنبؤ (`models/forecaster.py`)
-- **المؤشر:** نسبة إعلانات الفترة التي تذكر المهارة، شهرياً (أو أسبوعياً بـ `--freq W`).
-- **غياب البيانات ≠ صفر:**
-  - الفترة التي فيها أقل من 10 إعلانات تُعامل كفترة غير مرصودة (NaN).
-  - تُستوفى لمدخلات النموذج فقط، حتى فجوتين متتاليتين، ولا تكون أبداً هدفاً للتدريب أو التقييم.
-- **فصل الأسواق:** سلاسل اليمن وسلاسل العالمي تُبنى منفصلة، والمقاييس تُحسب لكل سوق.
-- **التقسيم الزمني لكل سلسلة:** [تدريب | تحقق 3 | اختبار 6].
-  - مقياس كل سلسلة يُحسب من جزء تدريبها فقط.
-  - النافذة تُختار تلقائياً بين 3 و6 حسب طول السلاسل.
-- **التقييم:** MAE وRMSE وMAPE (فقط حيث القيمة الفعلية ≥ 1%)، مقارنةً بـ Naive وبالمتوسط المتحرك.
-- **ملفات التقييم:**
-  - `artifacts/lstm_metrics.json`.
-  - `artifacts/lstm_test_predictions.csv`: الفعلي مقابل المتوقع.
-- **شرط الكفاية:** 18 فترة، 80% منها مرصودة، و25 ذكراً للمهارة. وإلا **لا يُدرَّب ولا يُعرض أي تنبؤ**، ويظهر ما ينقص.
-
-## 5. التدقيق العلمي — ما يمكن إثباته من الكود والملفات
-| الادعاء | الدليل |
+| Model Family | Forecasting Target |
 |---|---|
-| لا تسرب بين التدريب والاختبار (FNN) | `split.group_overlap_train_test = 0` في `classifier_metrics.json` (مع assert في الكود) |
-| لا تسرب زمني (LSTM) | تقسيم زمني + مقياس من التدريب فقط + متوسط متحرك لاحق (`forecaster.py`) |
-| لا بيانات اصطناعية في النتائج الحقيقية | وضعان بمجلدات منفصلة؛ `pipeline.load_raw_sources` يرفض DEMO |
-| الـ Transformer غير مدرب/غير مضبوط | يُحمَّل ويُستخدم بـ `encode` فقط؛ `encoder_note` في المقاييس |
-| الاستخراج القاموسي ليس DL | موسوم `method=lexicon` منفصلاً عن `semantic` |
-| الدقة تُقرأ مقابل خط أساس | `baseline_majority` + تحذير عند اختبار < 50 سجلاً |
-| مصدر البيانات وتاريخ جمعها | `data_report.json → provenance` وشريط المصدر في الصفحات |
-| حالة كل نموذج | الشريط الجانبي + صفحة "النماذج وتقييمها" + `data_report.json` |
+| Skills | Demand for professional skills |
+| Specializations | Demand for academic and professional specializations |
+| Job Titles | Demand for job titles |
+| Governorates | Geographic distribution of opportunities |
 
-## الاختبارات
+Forecasting models are evaluated against Naive and Moving Average baselines.
+
+## 4. Technology Stack | التقنيات المستخدمة
+
+| Technology | Purpose |
+|---|---|
+| Python | Main programming language |
+| PyTorch | Deep Learning |
+| AraBERT | Arabic NLP |
+| Transformers | Pretrained language models and fine-tuning |
+| LSTM | Time-series forecasting |
+| Pandas & NumPy | Data processing |
+| Scikit-learn | Evaluation and baseline models |
+| Streamlit | Interactive application |
+| Plotly | Interactive visualizations |
+| Google Colab | Model training environment |
+
+## 5. Project Structure | هيكل المشروع
+
+```text
+Yemen-Labor-Market-Intelligence-LMI/
+│
+├── app_dl/
+│   ├── main.py
+│   ├── common.py
+│   └── views/
+│
+├── src/
+│   ├── data/
+│   ├── training/
+│   ├── evaluation/
+│   ├── inference/
+│   ├── forecasting/
+│   ├── integration/
+│   └── offline/
+│
+├── preprocessing/
+├── core/
+├── config/
+├── utils/
+├── pages/
+├── scripts/
+├── notebooks/
+├── docs/
+├── tests/
+│
+├── app.py
+├── requirements.txt
+├── requirements_dl.txt
+├── requirements_runtime.txt
+├── .gitignore
+└── README.md
+```
+
+## 6. Installation | التثبيت
+
+Clone the repository:
+
 ```bash
-python -m tests.test_scraper_mock                 # الجامع على خادم وهمي (ترقيم، تصنيفات، فشل، استكمال، تكرار)
-python -m tests.test_pages                        # كل الصفحات + الأزرار + رفع CSV/Excel
-LMI_MODE=demo python -m tests.test_pages
-# تكامل كامل (يكتب بيانات وهمية — في نسخة مؤقتة فقط، والسكربت يرفض غير ذلك):
-# cp -r lmi /tmp/e2e && cd /tmp/e2e && rm -rf data/raw/* && LMI_E2E_ROOT=/tmp/e2e python -m tests.e2e_mock
+git clone https://github.com/raqiFaisal/Yemen-Labor-Market-Intelligence-LMI-.git
 ```
 
-## البنية
+Navigate to the project directory:
+
+```bash
+cd Yemen-Labor-Market-Intelligence-LMI-
 ```
-app.py                         التنقل + حالة النظام + شارة الوضع
-pages/1..10                    الواجهة (لا منطق نماذج)
-core/config.py                 المسارات والثوابت ووضع التشغيل
-core/pipeline.py               تحميل → توحيد → فئات → مهارات → حفظ
-core/artifacts.py              حالة النماذج وحذف القديم
-preprocessing/schema.py        المخطط الموحد ومعرفات ثابتة ومحافظات
-preprocessing/text.py          تنظيف عربي/إنجليزي/مختلط
-preprocessing/categories.py    تصنيفات المصادر → 8 مجالات (صريح)
-preprocessing/labeling.py      تسميات gold/source + اقتراحات + طابور المراجعة
-preprocessing/taxonomy_seed.py قاموس المهارات والمجالات والتخصصات
-models/encoder.py              Sentence-Transformer (+ بديل موسوم)
-models/embedding_store.py      Embeddings تزايدية
-models/skill_extractor.py      قاموسي + دلالي
-models/classifier.py           FNN
-models/forecaster.py           LSTM
-models/gap.py                  فجوة المهارات
-scripts/scrape_yemen.py        واجهة الجمع     scripts/scrapers/{base,yemenhr,generic}.py
-scripts/train_all.py           الخط الكامل     scripts/train_demo.py  وضع العرض
-scripts/label_jobs.py          تصنيف يدوي      scripts/inspect_skills.py  فحص/تقييم الاستخراج
-scripts/fetch_external.py      ArabJobs + O*NET/ESCO
-tests/                         اختبارات
+
+Install dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+python -m pip install -r requirements_dl.txt
 ```
+
+## 7. Running the Application | تشغيل التطبيق
+
+The primary Deep Learning application entry point is:
+
+```bash
+python -m streamlit run app_dl/main.py
+```
+
+The application provides an Arabic right-to-left interface.
+
+**Note:** The previous application entry point `app.py` is retained as a legacy version. The recommended entry point for the Deep Learning release is `app_dl/main.py`.
+
+## 8. Training Models | تدريب النماذج
+
+### AraBERT Classification
+
+```bash
+python -m src.training.train_classifier --task opportunity_type
+
+python -m src.training.train_classifier --task geographic_scope
+```
+
+### AraBERT NER
+
+```bash
+python -m src.training.train_ner
+```
+
+### LSTM Forecasting
+
+```bash
+python -m src.forecasting.train_lstm
+```
+
+The Colab training notebook is available at:
+
+`notebooks/train_dl_colab.ipynb`
+
+GPU is recommended for AraBERT fine-tuning. LSTM training supports CPU execution.
+
+## 9. Evaluation | تقييم النماذج
+
+Classification evaluation:
+
+```bash
+python -m src.evaluation.evaluate_classifier --task opportunity_type
+```
+
+NER evaluation:
+
+```bash
+python -m src.evaluation.evaluate_ner
+```
+
+The evaluation pipeline supports independent test-set evaluation and performance reporting.
+
+## 10. Data and Model Assets | البيانات والنماذج
+
+The repository contains source code, training scripts, notebooks, and documentation.
+
+Large training datasets, trained model weights, and generated reports are maintained separately and are not included in this public repository.
+
+To run the complete application, provide the required dataset and model directories.
+
+The application supports these environment variables:
+
+- `LMI_FINAL_DIR`: Final training dataset directory.
+- `LMI_MODELS_DIR`: Trained models directory.
+- `LMI_REPORTS_DIR`: Evaluation reports directory.
+
+Dataset annotation methodology and model training procedures are documented in the `docs/` directory.
+
+## 11. Documentation | التوثيق
+
+- `docs/DL_SYSTEM.md` — Deep Learning architecture and training guide.
+- `docs/DATASET.md` — Dataset structure and processing methodology.
+- `docs/RESULTS.md` — Recorded evaluation and forecasting results.
+- `FINAL_PROJECT_REPORT.md` — Project technical report.
+
+## 12. Testing | الاختبارات
+
+Run the Deep Learning system tests:
+
+```bash
+pytest -q tests/test_dl_system.py
+```
+
+---
+
+### Project Vision
+
+**From Data to Insights Supporting the Future of Yemen's Labor Market.**
+
+«من البيانات إلى رؤى تدعم مستقبل سوق العمل اليمني»
+
+**Developed by: Eng. Ruqayya Faisal Al-Taybi**
+
+**Yemen Labor Market Intelligence (LMI)**
