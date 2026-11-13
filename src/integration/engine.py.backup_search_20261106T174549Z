@@ -1,0 +1,514 @@
+"""محرك التكامل: يربط بيانات السوق النهائية + نماذج AraBERT المدربة + توقعات LSTM المحفوظة في واجهة واحدة.
+
+لا يُعاد تدريب أي نموذج هنا، ولا توجد قواعد بديلة لتحليل الإعلان: إن غاب نموذج يُعاد ذلك صراحةً
+(status = "model_not_available") بدل اختلاق نتيجة.
+
+    from src.integration.engine import Engine
+    eng = Engine()                      # يقرأ DATA_DIR / MODELS_DIR / REPORTS_DIR
+    eng.market.top_skills(20)
+    eng.analyze_ad(text)                # نوع الفرصة + النطاق + الكيانات (نماذج فقط)
+    eng.skill_gap(["Excel", "محاسبة"], target_specialization="محاسبة")
+"""
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass, field
+from functools import cached_property
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from src.common import DATA_DIR, MODELS_DIR, REPORTS_DIR
+
+LABOR = ("JOB", "INTERNSHIP")
+FAMILIES = ("skills", "specializations", "job_titles", "governorates")
+ENTITY_AR = {"JOB_TITLE": "المسمى الوظيفي", "ORGANIZATION": "الجهة", "SKILL": "المهارة", "DEGREE": "المؤهل",
+             "MAJOR": "التخصص", "EXPERIENCE": "الخبرة", "LOCATION": "الموقع", "SALARY": "الراتب", "DEADLINE": "آخر موعد",
+             "QUALIFICATION": "المؤهل", "SPECIALIZATION": "التخصص"}
+
+
+# ───────────────────────────── أدوات نصية ─────────────────────────────
+_DIAC = re.compile(r"[ً-ْـ]")
+
+
+def norm(t) -> str:
+    """تطبيع للمطابقة فقط (لا يُعرض): حروف صغيرة، توحيد الألف/الياء/التاء المربوطة، إزالة التشكيل."""
+    t = _DIAC.sub("", str(t or "")).lower()
+    t = re.sub("[إأآا]", "ا", t).replace("ى", "ي").replace("ة", "ه")
+    t = re.sub(r"^ال(?=\w{3,})", "", t.strip())
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s+#.]", " ", t)).strip()
+
+
+def split_multi(s: str) -> list[str]:
+    return [x.strip() for x in str(s or "").split(";") if x.strip()]
+
+
+# ───────────────────────────── بيانات السوق ─────────────────────────────
+class Market:
+    """مؤشرات سوق العمل من الإعلانات الفريدة (بعد إزالة التكرار) في FINAL_TRAINING_DATASET."""
+
+    def __init__(self, data_dir: Path = DATA_DIR):
+        self.dir = Path(data_dir)
+
+    @property
+    def available(self) -> bool:
+        return (self.dir / "unique_opportunities.csv").exists()
+
+    def _need(self):
+        if not self.available:
+            raise FileNotFoundError(f"البيانات النهائية غير موجودة: {self.dir / 'unique_opportunities.csv'}")
+
+    @cached_property
+    def all_unique(self) -> pd.DataFrame:
+        self._need()
+        u = pd.read_csv(self.dir / "unique_opportunities.csv", dtype=str, keep_default_na=False)
+        from src.integration.canon import canon_specs
+        u["specializations_raw"] = u.specializations
+        u["specializations"] = u.specializations.map(canon_specs)      # توحيد الصيغ للتحليل فقط
+        u["date"] = pd.to_datetime(u.get("posting_date", ""), errors="coerce")
+        u["month"] = u.date.dt.to_period("M").astype(str).where(u.date.notna(), "")
+        return u
+
+    @cached_property
+    def jobs(self) -> pd.DataFrame:
+        """الوظائف والتدريب العملي فقط (المنح/المناقصات/غير ذات الصلة خارج مؤشرات الطلب على المهارات)."""
+        return self.all_unique[self.all_unique.opportunity_type.isin(LABOR)].copy()
+
+    @cached_property
+    def job_skills(self) -> pd.DataFrame:
+        f = self.dir / "skills" / "job_skills.csv"
+        if not f.exists():
+            return pd.DataFrame(columns=["job_id", "skill_id", "name_ar", "name_en", "skill_type"])
+        s = pd.read_csv(f, dtype=str, keep_default_na=False)
+        s = s[s.decision == "accepted"] if "decision" in s else s
+        return s[s.job_id.isin(set(self.jobs.job_id))].drop_duplicates(["job_id", "skill_id"])
+
+    @cached_property
+    def catalog(self) -> pd.DataFrame:
+        f = self.dir / "skills" / "skill_catalog.csv"
+        if f.exists():
+            return pd.read_csv(f, dtype=str, keep_default_na=False)
+        js = self.job_skills
+        return js[["skill_id", "name_ar", "name_en", "skill_type"]].drop_duplicates("skill_id")
+
+    def skill_name(self, sid: str) -> str:
+        r = self.catalog[self.catalog.skill_id == sid]
+        return (r.name_ar.iloc[0] or r.name_en.iloc[0]) if len(r) else sid
+
+    # ── تصفية ──
+    def filtered(self, governorate: str | None = None, specialization: str | None = None,
+                 start: str | None = None, end: str | None = None, types=LABOR) -> pd.DataFrame:
+        u = self.all_unique[self.all_unique.opportunity_type.isin(types)]
+        if governorate:
+            u = u[u.governorate == governorate]
+        if specialization:
+            u = u[u.specializations.map(lambda s: specialization in split_multi(s))]
+        if start:
+            u = u[(u.month != "") & (u.month >= start)]
+        if end:
+            u = u[(u.month != "") & (u.month <= end)]
+        return u
+
+    # ── مؤشرات ──
+    def overview(self) -> dict:
+        a, j = self.all_unique, self.jobs
+        d = j.date.dropna()
+        return {"unique_opportunities": int(len(a)), "unique_jobs_internships": int(len(j)),
+                "organizations": int(j.get("organization_canonical", j.organization).replace("", np.nan).nunique()),
+                "governorates_covered": int(j.governorate.replace("", np.nan).nunique()),
+                "distinct_skills": int(self.job_skills.skill_id.nunique()),
+                "jobs_with_skills_pct": round(100 * self.job_skills.job_id.nunique() / max(len(j), 1), 1),
+                "date_from": str(d.min().date()) if len(d) else None, "date_to": str(d.max().date()) if len(d) else None,
+                "sources": int(a.source_channel.replace("", np.nan).nunique()) if "source_channel" in a else None}
+
+    def distribution(self, col: str, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        df = self.all_unique if df is None else df
+        v = df[col].replace("", "غير محدد").value_counts()
+        return pd.DataFrame({col: v.index, "count": v.values, "pct": (100 * v.values / max(v.sum(), 1)).round(1)})
+
+    def top_skills(self, n: int = 20, df: pd.DataFrame | None = None, skill_type: str | None = None) -> pd.DataFrame:
+        jobs = self.jobs if df is None else df
+        js = self.job_skills[self.job_skills.job_id.isin(set(jobs.job_id))]
+        if skill_type:
+            js = js[js.skill_type == skill_type]
+        c = js.groupby("skill_id").job_id.nunique().sort_values(ascending=False).head(n)
+        out = pd.DataFrame({"skill_id": c.index, "jobs": c.values})
+        out["skill"] = out.skill_id.map(self.skill_name)
+        out["pct_of_jobs"] = (100 * out.jobs / max(len(jobs), 1)).round(1)
+        return out[["skill", "skill_id", "jobs", "pct_of_jobs"]]
+
+    def top_multi(self, col: str, n: int = 20, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        jobs = self.jobs if df is None else df
+        x = jobs[["job_id", col]].assign(item=jobs[col].map(split_multi)).explode("item")
+        x = x[x.item.notna() & (x.item != "")]
+        c = x.groupby("item").job_id.nunique().sort_values(ascending=False).head(n)
+        return pd.DataFrame({col: c.index, "jobs": c.values, "pct_of_jobs": (100 * c.values / max(len(jobs), 1)).round(1)})
+
+    def top_titles(self, n: int = 20, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        from preprocessing.dedup import norm_title
+        jobs = self.jobs if df is None else df
+        t = jobs.job_title.map(norm_title)
+        keep = jobs[t.str.len() >= 3].assign(key=t)
+        g = keep.groupby("key").agg(jobs=("job_id", "nunique"), example=("job_title", lambda s: s.value_counts().index[0]))
+        g = g.sort_values("jobs", ascending=False).head(n).reset_index(drop=True)
+        g["pct_of_jobs"] = (100 * g.jobs / max(len(jobs), 1)).round(1)
+        return g.rename(columns={"example": "job_title"})[["job_title", "jobs", "pct_of_jobs"]]
+
+    def monthly(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        jobs = self.jobs if df is None else df
+        m = jobs[jobs.month != ""].groupby(["month", "opportunity_type"]).size().unstack(fill_value=0)
+        return m.sort_index()
+
+    def skill_trend(self, skill_ids: list[str], df: pd.DataFrame | None = None) -> pd.DataFrame:
+        """الحصة الشهرية من الإعلانات التي تذكر المهارة (من البيانات المرصودة، لا توقع)."""
+        jobs = self.jobs if df is None else df
+        jobs = jobs[jobs.month != ""]
+        tot = jobs.groupby("month").size()
+        js = self.job_skills[self.job_skills.skill_id.isin(skill_ids)].merge(jobs[["job_id", "month"]], on="job_id")
+        c = js.groupby(["month", "skill_id"]).job_id.nunique().unstack(fill_value=0).reindex(tot.index, fill_value=0)
+        return c.div(tot, axis=0).rename(columns=self.skill_name)
+
+    def spec_skill(self, top_specs: int = 10, top_skills: int = 15, min_jobs: int = 5) -> dict:
+        """علاقة التخصص ↔ المهارة: الحصة P(مهارة|تخصص) و Lift = P(مهارة|تخصص)/P(مهارة)."""
+        j = self.jobs
+        x = j[["job_id"]].assign(spec=j.specializations.map(split_multi)).explode("spec").dropna()
+        x = x[x.spec != ""]
+        specs = x.spec.value_counts()
+        specs = specs[specs >= min_jobs].head(top_specs).index.tolist()
+        skills = self.top_skills(top_skills).skill_id.tolist()
+        if not specs or not skills:
+            return {"share": pd.DataFrame(), "lift": pd.DataFrame(), "specs": specs, "skills": skills}
+        has = self.job_skills[self.job_skills.skill_id.isin(skills)]
+        base = has.groupby("skill_id").job_id.nunique() / max(len(j), 1)
+        share = pd.DataFrame(index=specs, columns=skills, dtype=float)
+        for s in specs:
+            ids = set(x[x.spec == s].job_id)
+            c = has[has.job_id.isin(ids)].groupby("skill_id").job_id.nunique()
+            share.loc[s] = (c.reindex(skills, fill_value=0) / len(ids)).values
+        lift = share.div(base.reindex(skills).replace(0, np.nan), axis=1)
+        names = {k: self.skill_name(k) for k in skills}
+        return {"share": share.rename(columns=names), "lift": lift.rename(columns=names), "specs": specs, "skills": skills}
+
+    def search(self, query: str = "", governorate: str | None = None, opportunity_type: str | None = None,
+               specialization: str | None = None, skill_id: str | None = None, limit: int = 200) -> pd.DataFrame:
+        u = self.all_unique
+        if opportunity_type:
+            u = u[u.opportunity_type == opportunity_type]
+        if governorate:
+            u = u[u.governorate == governorate]
+        if specialization:
+            u = u[u.specializations.map(lambda s: specialization in split_multi(s))]
+        if skill_id:
+            u = u[u.job_id.isin(set(self.job_skills[self.job_skills.skill_id == skill_id].job_id))]
+        q = norm(query)
+        if q:
+            hay = (u.job_title + " " + u.organization + " " + u.get("text_clean", u.raw_text).str[:3000]).map(norm)
+            terms = q.split()
+            u = u[hay.map(lambda h: all(t in h for t in terms))]
+        cols = [c for c in ["posting_date", "job_title", "organization", "governorate", "opportunity_type",
+                            "geographic_scope", "specializations", "education", "experience_min_years",
+                            "application_deadline", "source_url"] if c in u.columns]
+        return u.sort_values("posting_date", ascending=False)[cols].head(limit)
+
+    def governorates(self) -> list[str]:
+        return sorted(x for x in self.jobs.governorate.unique() if x)
+
+    def specializations(self, min_jobs: int = 3) -> list[str]:
+        v = self.jobs.specializations.map(split_multi).explode().dropna().value_counts()
+        return [s for s, c in v.items() if s and c >= min_jobs]
+
+
+# ───────────────────────────── التوقعات (LSTM محفوظ) ─────────────────────────────
+class Forecasts:
+    """قراءة مخرجات LSTM المحفوظة فقط (لا تدريب داخل التطبيق)."""
+
+    def __init__(self, reports_dir: Path = REPORTS_DIR):
+        self.dir = Path(reports_dir) / "evaluation"
+
+    def summary(self) -> dict | None:
+        f = self.dir / "lstm_summary.json"
+        return json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+
+    def family(self, fam: str) -> dict:
+        d = self.dir / f"lstm_{fam}"
+        if not (d / "metrics.json").exists():
+            return {"family": fam, "status": "not_available", "reason": "لم يُشغَّل تدريب LSTM لهذه العائلة بعد"}
+        m = json.loads((d / "metrics.json").read_text(encoding="utf-8"))
+        if not m.get("trained"):
+            return {"family": fam, "status": "not_trained", "reason": m.get("reason"), "metrics": m,
+                    "sufficiency": self._csv(d / "sufficiency.csv")}
+        return {"family": fam, "status": "ok", "metrics": m,
+                "history": self._csv(d / "series_used.csv", index_col=0),
+                "future": self._csv(d / "future_forecast.csv", index_col=0),
+                "trend": self._csv(d / "trend_forecast.csv"),
+                "test_predictions": self._csv(d / "test_predictions.csv"),
+                "per_series": self._csv(d / "per_series_test_mae.csv"),
+                "sufficiency": self._csv(d / "sufficiency.csv"),
+                "plot": str(d / "actual_vs_predicted.png") if (d / "actual_vs_predicted.png").exists() else None}
+
+    @staticmethod
+    def _csv(f: Path, **kw):
+        return pd.read_csv(f, encoding="utf-8-sig", **kw) if f.exists() else None
+
+
+# ───────────────────────────── تحليل الإعلان (نماذج DL فقط) ─────────────────────────────
+class AdAnalyzer:
+    """يحمّل نماذج AraBERT المحفوظة مرة واحدة. كل مكوّن مستقل: غياب نموذج لا يوقف البقية ولا يُستبدل بقواعد."""
+
+    def __init__(self, models_dir: Path = MODELS_DIR):
+        self.dir = Path(models_dir)
+        self._cache: dict = {}
+
+    def paths(self) -> dict:
+        return {"opportunity_type": self.dir / "classification" / "opportunity_type",
+                "geographic_scope": self.dir / "classification" / "geographic_scope",
+                "ner": self.dir / "ner"}
+
+    def offline_paths(self) -> dict:
+        return {"opportunity_type": self.dir / "offline" / "classification" / "opportunity_type",
+                "geographic_scope": self.dir / "offline" / "classification" / "geographic_scope",
+                "ner": self.dir / "offline" / "ner"}
+
+    def status(self) -> dict:
+        """Return checkpoint validation, including source architecture and provenance.
+
+        If AraBERT is absent but a genuine CPU-trained checkpoint exists,
+        use it explicitly under its own model_family, never disguise it.
+        """
+        from src.inference.predictors import _check_dir, ModelNotAvailable
+        out = {}
+        for k, pretrained_path in self.paths().items():
+            geo_path = self.dir / "offline" / "classification" / "geographic_scope_v2"
+            if k == "geographic_scope" and (geo_path / "model.pt").is_file() and (geo_path / "config.json").is_file():
+                info = {"available": True, "path": str(geo_path),
+                        "model_family": "GeoScopeNetV2 (PyTorch; supervised SILVER)",
+                        "pretrained_available": False,
+                        "config": json.loads((geo_path / "config.json").read_text(encoding="utf-8"))}
+                out[k] = info
+                continue
+            offline_path = self.offline_paths()[k]
+            try:
+                _check_dir(pretrained_path)
+                ok, p, model_family = True, pretrained_path, "AraBERT fine-tuned"
+            except ModelNotAvailable:
+                geo_path = self.dir / "offline" / "classification" / "geographic_scope_v2"
+                if k == "geographic_scope" and (geo_path / "model.pt").is_file() and (geo_path / "config.json").is_file():
+                    ok, p, model_family = True, geo_path, "GeoScopeNetV2 (PyTorch; supervised SILVER)"
+                else:
+                    ok = (offline_path / "config.json").is_file() and (offline_path / "model.pt").is_file()
+                    p = offline_path if ok else pretrained_path
+                    model_family = "PyTorch CPU neural baseline trained from scratch (SILVER)" if ok else "unavailable"
+            info = {"available": ok, "path": str(p), "model_family": model_family,
+                    "pretrained_available": model_family == "AraBERT fine-tuned"}
+            for fn in ("training_config.json", "best_validation_metrics.json", "config.json"):
+                if (p / fn).exists():
+                    info[fn.split(".")[0]] = json.loads((p / fn).read_text(encoding="utf-8"))
+            out[k] = info
+        return out
+
+    def _load(self, key: str):
+        from src.inference.predictors import NERTagger, TextClassifier, _check_dir, ModelNotAvailable
+        if key not in self._cache:
+            if key == "geographic_scope":
+                geo_path = self.dir / "offline" / "classification" / "geographic_scope_v2"
+                if (geo_path / "model.pt").is_file() and (geo_path / "config.json").is_file():
+                    from src.offline.geographic_v2 import GeoScopeClassifier
+                    self._cache[key] = GeoScopeClassifier(geo_path)
+                    return self._cache[key]
+            pretrained_path = self.paths()[key]
+            try:
+                _check_dir(pretrained_path)
+                self._cache[key] = NERTagger(pretrained_path) if key == "ner" else TextClassifier(pretrained_path)
+            except ModelNotAvailable as pretrained_error:
+                if key == "geographic_scope":
+                    geo_path = self.dir / "offline" / "classification" / "geographic_scope_v2"
+                    if (geo_path / "model.pt").is_file() and (geo_path / "config.json").is_file():
+                        from src.offline.geographic_v2 import GeoScopeClassifier
+                        self._cache[key] = GeoScopeClassifier(geo_path)
+                        return self._cache[key]
+                from src.offline.neural import OfflineClassifier, OfflineNERTagger
+                offline_path = self.offline_paths()[key]
+                if not (offline_path / 'model.pt').exists():
+                    raise pretrained_error
+                self._cache[key] = OfflineNERTagger(offline_path) if key == "ner" else OfflineClassifier(offline_path)
+        return self._cache[key]
+
+    def analyze(self, text: str) -> dict:
+        from src.inference.predictors import ModelNotAvailable
+        text = (text or "").strip()
+        if len(text) < 15:
+            raise ValueError("النص قصير جداً للتحليل (أقل من 15 حرفاً)")
+        if len(text) > 20000:
+            text = text[:20000]
+        res = {"text_chars": len(text), "components": {}}
+        for key in ("opportunity_type", "geographic_scope"):
+            try:
+                res["components"][key] = {"status": "ok", **self._load(key).predict(text)}
+            except ModelNotAvailable as e:
+                res["components"][key] = {"status": "model_not_available", "reason": str(e)}
+        try:
+            ner = self._load("ner").extract(text)
+            ents = ner["entities"]
+            grouped: dict[str, list] = {}
+            for e in ents:
+                lst = grouped.setdefault(e["label"], [])
+                if e["text"] not in [x["text"] for x in lst]:
+                    lst.append({"text": e["text"], "confidence": e["confidence"]})
+            res["components"]["ner"] = {"status": "ok", "entities": ents, "grouped": grouped,
+                                        "n_entities": len(ents), "model_family": ner.get("model_family", "AraBERT fine-tuned")}
+        except ModelNotAvailable as e:
+            res["components"]["ner"] = {"status": "model_not_available", "reason": str(e)}
+        res["all_models_available"] = all(c["status"] == "ok" for c in res["components"].values())
+        return res
+
+
+# ───────────────────────────── فجوة المهارات ─────────────────────────────
+@dataclass
+class GapResult:
+    target: str
+    n_target_jobs: int
+    matched: list = field(default_factory=list)
+    missing: list = field(default_factory=list)
+    unrecognized: list = field(default_factory=list)
+    match_pct: float = 0.0
+    nearest_jobs: pd.DataFrame | None = None
+    recommendations: list = field(default_factory=list)
+    note: str = ""
+
+
+class SkillGap:
+    """يقارن مهارات المستخدم بملف الطلب الفعلي لتخصص/مسمى في البيانات.
+
+    ملف الطلب = المهارات التي تظهر في ≥ min_share من إعلانات الهدف، وزن كل مهارة = حصتها.
+    نسبة التطابق = مجموع أوزان المهارات التي يملكها المستخدم ÷ مجموع الأوزان (تطابق مرجّح بالطلب).
+    """
+
+    def __init__(self, market: Market, forecasts: Forecasts | None = None):
+        self.m, self.f = market, forecasts
+
+    @cached_property
+    def lexicon(self) -> dict[str, str]:
+        lex = {}
+        for r in self.m.catalog.itertuples():
+            for name in (r.skill_id, r.name_ar, r.name_en):
+                if name:
+                    lex[norm(name)] = r.skill_id
+        try:
+            from preprocessing.taxonomy_seed import SKILLS   # (id, en, ar, type, domains, synonyms) — نفس قاموس الاستخراج
+            known = set(self.m.catalog.skill_id)
+            for row in SKILLS:
+                if row[0] in known or not known:
+                    for name in (row[1], row[2], *row[5]):
+                        lex.setdefault(norm(name), row[0])
+        except Exception:
+            pass
+        return lex
+
+    def resolve(self, skills: list[str]) -> tuple[list[str], list[str]]:
+        ids, unk = [], []
+        for s in skills:
+            k = norm(s)
+            if not k:
+                continue
+            sid = self.lexicon.get(k)
+            if sid is None:   # تطابق جزئي آمن: اسم مهارة كامل داخل المدخل أو العكس (≥ 4 أحرف)
+                cand = [v for n, v in self.lexicon.items() if len(n) >= 4 and (n == k or (len(k) >= 4 and (k in n.split() or n in k.split())))]
+                sid = cand[0] if len(set(cand)) == 1 else None
+            (ids if sid else unk).append(sid or s)
+        return list(dict.fromkeys(ids)), unk
+
+    def target_jobs(self, specialization: str | None, title: str | None) -> tuple[pd.DataFrame, str]:
+        j = self.m.jobs
+        if specialization:
+            return j[j.specializations.map(lambda s: specialization in split_multi(s))], f"تخصص: {specialization}"
+        if title:
+            q = norm(title).split()
+            t = j.job_title.map(norm)
+            return j[t.map(lambda h: all(w in h for w in q))], f"مسمى: {title}"
+        return j, "كل السوق"
+
+    def analyze(self, user_skills: list[str], target_specialization: str | None = None, target_title: str | None = None,
+                min_share: float = 0.08, max_profile: int = 20, k_jobs: int = 10, min_target_jobs: int = 10) -> GapResult:
+        if not user_skills or not any(str(s).strip() for s in user_skills):
+            raise ValueError("أدخل مهارة واحدة على الأقل")
+        have, unk = self.resolve(user_skills)
+        tj, label = self.target_jobs(target_specialization, target_title)
+        res = GapResult(target=label, n_target_jobs=int(len(tj)), unrecognized=unk)
+        if len(tj) < min_target_jobs:
+            res.note = f"عدد إعلانات الهدف ({len(tj)}) أقل من {min_target_jobs} — لا يكفي لبناء ملف طلب موثوق"
+            return res
+        js = self.m.job_skills[self.m.job_skills.job_id.isin(set(tj.job_id))]
+        share = (js.groupby("skill_id").job_id.nunique() / len(tj)).sort_values(ascending=False)
+        prof = share[share >= min_share].head(max_profile)
+        if prof.empty:
+            res.note = "لا توجد مهارات متكررة كافية في إعلانات هذا الهدف"
+            return res
+        hs = set(have)
+        res.matched = [{"skill_id": s, "skill": self.m.skill_name(s), "demand_pct": round(100 * w, 1)} for s, w in prof.items() if s in hs]
+        res.missing = [{"skill_id": s, "skill": self.m.skill_name(s), "demand_pct": round(100 * w, 1)} for s, w in prof.items() if s not in hs]
+        res.match_pct = round(100 * prof[prof.index.isin(hs)].sum() / prof.sum(), 1)
+        # أقرب الإعلانات: نسبة مهارات الإعلان التي يغطيها المستخدم (مع شرط تقاطع ≥ 1)
+        per = js.groupby("job_id").skill_id.apply(set)
+        rows = []
+        for jid, ss in per.items():
+            inter = len(ss & hs)
+            if inter:
+                rows.append({"job_id": jid, "coverage": inter / len(ss), "jaccard": inter / len(ss | hs),
+                             "shared": "، ".join(self.m.skill_name(x) for x in ss & hs),
+                             "missing": "، ".join(self.m.skill_name(x) for x in ss - hs)})
+        if rows:
+            nj = pd.DataFrame(rows).sort_values(["coverage", "jaccard"], ascending=False).head(k_jobs)
+            meta = tj.set_index("job_id")[[c for c in ["job_title", "organization", "governorate", "posting_date", "source_url"] if c in tj]]
+            nj = nj.join(meta, on="job_id")
+            nj["coverage"] = (100 * nj.coverage).round(0)
+            nj["jaccard"] = nj.jaccard.round(3)
+            res.nearest_jobs = nj
+        res.recommendations = self._recommend(res.missing)
+        return res
+
+    def _recommend(self, missing: list[dict], n: int = 5) -> list[dict]:
+        trend = None
+        if self.f:
+            fam = self.f.family("skills")
+            # اتجاه LSTM يُستخدم في التوصيات فقط إن تفوق النموذج على Naive في الاختبار
+            if fam["status"] == "ok" and fam.get("trend") is not None and fam["metrics"].get("lstm_beats_naive_mae"):
+                trend = fam["trend"].set_index("item")
+        out = []
+        for m in missing[:n]:
+            r = {"skill": m["skill"], "demand_pct": m["demand_pct"],
+                 "why": f"مطلوبة في {m['demand_pct']}% من إعلانات الهدف"}
+            if trend is not None and m["skill_id"] in trend.index:
+                t = trend.loc[m["skill_id"]]
+                r["forecast_direction"] = t.direction
+                r["why"] += f"؛ اتجاه توقع LSTM: {t.direction}"
+            out.append(r)
+        return out
+
+
+# ───────────────────────────── الواجهة الموحدة ─────────────────────────────
+class Engine:
+    def __init__(self, data_dir: Path = DATA_DIR, models_dir: Path = MODELS_DIR, reports_dir: Path = REPORTS_DIR):
+        self.market = Market(data_dir)
+        self.forecasts = Forecasts(reports_dir)
+        self.ads = AdAnalyzer(models_dir)
+        self.gap = SkillGap(self.market, self.forecasts)
+        self.reports_dir = Path(reports_dir)
+
+    def analyze_ad(self, text: str) -> dict:
+        return self.ads.analyze(text)
+
+    def skill_gap(self, skills: list[str], **kw) -> GapResult:
+        return self.gap.analyze(skills, **kw)
+
+    def evaluation_results(self) -> dict:
+        """نتائج التقييم المحفوظة (test) للنماذج وخطوط الأساس — للعرض في صفحة معلومات النماذج."""
+        ev = self.reports_dir / "evaluation"
+        out = {}
+        for name in ("classification_opportunity_type", "classification_geographic_scope", "ner",
+                     "baseline_opportunity_type", "baseline_geographic_scope", "baseline_ner"):
+            f = ev / name / "metrics.json"
+            out[name] = json.loads(f.read_text(encoding="utf-8")) if f.exists() else None
+        out["lstm"] = self.forecasts.summary()
+        return out

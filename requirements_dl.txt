@@ -1,0 +1,17 @@
+# متطلبات نظام التعلم العميق (AraBERT + LSTM + التطبيق الجديد app_dl) — إضافة إلى requirements.txt
+transformers>=4.44,<5
+torch>=2.1
+safetensors
+tokenizers
+accelerate
+arabert            # ArabertPreprocessor (اختياري: بدونه يُستخدم النص كما هو)
+seqeval>=1.2
+sklearn-crfsuite   # خط أساس CRF لـ NER
+scikit-learn>=1.3
+pandas>=2.0
+numpy>=1.24
+matplotlib
+streamlit>=1.40
+plotly>=5.20
+joblib
+pytest

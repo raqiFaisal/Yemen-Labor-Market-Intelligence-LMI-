@@ -1,0 +1,8 @@
+# Minimal reproducible dependencies for the delivered OFFLINE CPU neural demo.
+# No Hugging Face model download required for this version of the application.
+streamlit>=1.40,<2
+plotly>=5.20,<7
+pandas>=2.0,<3
+numpy>=1.24,<3
+scikit-learn>=1.3,<2
+torch>=2.1
