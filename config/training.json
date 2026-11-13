@@ -1,0 +1,49 @@
+{
+  "_doc": "إعدادات تدريب نماذج التعلم العميق. القيم قابلة للتعديل من سطر الأوامر. لا تُستخدم بيانات test في التدريب أو اختيار النموذج.",
+  "seed": 42,
+  "arabert_model": "aubmindlab/bert-base-arabertv02",
+  "classification": {
+    "max_length": 256,
+    "batch_size": 16,
+    "eval_batch_size": 32,
+    "learning_rate": 2e-05,
+    "weight_decay": 0.01,
+    "epochs": 5,
+    "warmup_ratio": 0.1,
+    "early_stopping_patience": 2,
+    "metric_for_best": "macro_f1",
+    "class_weights": true,
+    "gradient_accumulation_steps": 2
+  },
+  "ner": {
+    "max_words_per_chunk": 180,
+    "max_length": 512,
+    "batch_size": 8,
+    "eval_batch_size": 16,
+    "learning_rate": 3e-05,
+    "weight_decay": 0.01,
+    "epochs": 6,
+    "warmup_ratio": 0.1,
+    "early_stopping_patience": 2,
+    "metric_for_best": "entity_f1",
+    "gradient_accumulation_steps": 2
+  },
+  "lstm": {
+    "lookback": 6,
+    "hidden_size": 32,
+    "num_layers": 1,
+    "dropout": 0.2,
+    "learning_rate": 0.003,
+    "epochs": 75,
+    "early_stopping_patience": 12,
+    "batch_size": 512,
+    "test_months": 6,
+    "val_months": 3,
+    "forecast_horizon": 6,
+    "min_months": 18,
+    "min_coverage": 0.8,
+    "min_mentions": 25,
+    "min_postings_per_month": 10,
+    "top_titles": 30
+  }
+}
