@@ -221,6 +221,24 @@ pytest -q tests/test_dl_system.py
 ### Project Vision
 
 **From Data to Insights Supporting the Future of Yemen's Labor Market.**
+---
+
+## 📸 Application Screenshots | صور واجهة التطبيق
+
+<p align="center">
+  <img src="assets/Screenshot%202026-11-13%20140918.png" width="48%" alt="LMI Screenshot 1">
+  <img src="assets/Screenshot%202026-11-13%20141005.png" width="48%" alt="LMI Screenshot 2">
+</p>
+
+<p align="center">
+  <img src="assets/Screenshot%202026-11-13%20141032.png" width="48%" alt="LMI Screenshot 3">
+  <img src="assets/Screenshot%202026-11-13%20141100.png" width="48%" alt="LMI Screenshot 4">
+</p>
+
+<p align="center">
+  <img src="assets/Screenshot%202026-11-13%20141151.png" width="48%" alt="LMI Screenshot 5">
+  <img src="assets/Screenshot%202026-11-13%20141400.png" width="48%" alt="LMI Screenshot 6">
+</p>
 
 «من البيانات إلى رؤى تدعم مستقبل سوق العمل اليمني»
 
